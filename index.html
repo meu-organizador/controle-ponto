@@ -284,7 +284,9 @@ td.obs textarea.salvando { border-color: var(--warn); }
     tolVoltaAlmoco: 0,     // min além do intervalo antes de contar atraso na volta
     limiteAntesAlmoco: 360,// máximo trabalhado antes de sair para o almoço (min)
     margemHorarioAlmoco: 30, // diferença aceita entre saída prevista e real para o almoço (min)
-    limiteDiario: 600      // máximo de horas trabalhadas no dia (min)
+    limiteDiario: 600,     // máximo de horas trabalhadas no dia (min)
+    tolAlmocoCurto: 0,     // tolerância para intervalo menor que o previsto (min)
+    janelaDuplicada: 5     // batidas com até X min de diferença contam como duplicadas
   };
 
   const TIME_RE = /\d{1,3}:\d{2}/g;
@@ -468,14 +470,24 @@ td.obs textarea.salvando { border-color: var(--warn); }
   function analisaDia(dia, escala, cfg) {
     const o = { tipo: classificaRotulo(dia.rotulo), ocorrencias: [] };
     const per = escala[dia.dow];
-    const t = dia.marcacoes.map(toMin);
     const add = (cod, min, txt) => o.ocorrencias.push({ cod, min: min || 0, txt });
+    // remove batidas duplicadas (mesmo horário ou poucos minutos depois da anterior)
+    const bruto = dia.marcacoes.map(toMin);
+    const t = [], dup = [];
+    bruto.forEach((v, i) => {
+      if (t.length && v - t[t.length - 1] >= 0 && v - t[t.length - 1] <= cfg.janelaDuplicada) dup.push(dia.marcacoes[i]);
+      else t.push(v);
+    });
+    if (dup.length) add("marcacaoDuplicada", 0, "Batida duplicada: " + dup.join(", ") + " (" + bruto.length + " batidas registradas)");
 
     if (!t.length) {
       if (per && !o.tipo && dia.prev) add("semMarcacao", dia.prev, "Dia de trabalho sem marcação e sem justificativa");
       return o;
     }
-    if (t.length % 2) add("incompleta", 0, "Marcação incompleta (" + t.length + " registros)");
+    const perDia = escala[dia.dow];
+    const esperado = perDia ? perDia.length * 2 : (t.length % 2 ? t.length + 1 : t.length);
+    if (t.length < esperado) add("marcacaoFaltando", 0, "Faltou marcação: " + t.length + " de " + esperado + " batidas");
+    else if (t.length > esperado) add("marcacaoExtra", 0, t.length + " batidas (previstas " + esperado + ")");
     let trabalhado = 0;
     for (let i = 0; i + 1 < t.length; i += 2) trabalhado += t[i + 1] - t[i];
     if (dia.trab != null) trabalhado = dia.trab;
@@ -512,6 +524,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
         let antes = 0;
         for (let i = 0; i <= gi; i++) antes += pares[i][1] - pares[i][0];
         if (antes > cfg.limiteAntesAlmoco) add("almocoApos6h", antes - cfg.limiteAntesAlmoco, "Saiu para o almoço às " + fmt(saiu) + " após " + fmt(antes) + " trabalhadas");
+        const curto = cfg.intervalo - (voltou - saiu);
+        if (curto > cfg.tolAlmocoCurto) add("almocoCurto", curto, "Intervalo de " + fmt(voltou - saiu) + " (" + fmt(saiu) + " às " + fmt(voltou) + "), faltaram " + fmt(curto));
         const excesso = (voltou - saiu) - cfg.intervalo;
         if (excesso > cfg.tolVoltaAlmoco) add("atrasoVolta", excesso, "Intervalo de " + fmt(voltou - saiu) + " (" + fmt(saiu) + " às " + fmt(voltou) + ")");
         const saidaAlmocoPrev = toMin(per[0][1]);
@@ -530,7 +544,10 @@ td.obs textarea.salvando { border-color: var(--warn); }
     atrasoVolta: "Atraso na volta do almoço",
     almocoForaHorario: "Almoço fora do horário",
     semIntervalo: "Intervalo não registrado",
-    incompleta: "Marcação incompleta",
+    almocoCurto: "Almoço menor que 1h",
+    marcacaoFaltando: "Faltou marcação",
+    marcacaoDuplicada: "Marcação duplicada",
+    marcacaoExtra: "Batidas a mais",
     semMarcacao: "Sem marcação"
   };
 
@@ -560,7 +577,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
     r.saldoMes = (c.totais && c.totais.saldo != null) ? c.totais.saldo - r.ajusteBanco : (r.horasPositivas - r.horasNegativas);
     r.bancoAnterior = c.resumo ? c.resumo.bancoAnterior : 0;
     r.bancoAcumulado = c.resumo ? c.resumo.bancoAcumulado : 0;
-    r.totalOcorrencias = ["atrasoEntrada", "saidaAntecipada", "almocoApos6h", "atrasoVolta", "almocoForaHorario", "semIntervalo", "acima10h"]
+    r.totalOcorrencias = ["atrasoEntrada", "saidaAntecipada", "almocoApos6h", "atrasoVolta", "almocoForaHorario", "semIntervalo", "acima10h", "almocoCurto", "marcacaoFaltando", "marcacaoDuplicada"]
       .reduce((s, k) => s + r.cont[k], 0) + r.faltas.length;
     return r;
   }
@@ -585,7 +602,9 @@ td.obs textarea.salvando { border-color: var(--warn); }
     ["tolVoltaAlmoco", "Tolerância além do intervalo na volta do almoço (min)"],
     ["limiteAntesAlmoco", "Máximo trabalhado antes de sair para o almoço (min)"],
     ["margemHorarioAlmoco", "Diferença aceita entre o horário previsto e o real de saída para o almoço (min)"],
-    ["limiteDiario", "Máximo de tempo trabalhado no dia (min). 600 = 10h"]
+    ["limiteDiario", "Máximo de tempo trabalhado no dia (min). 600 = 10h"],
+    ["tolAlmocoCurto", "Tolerância para almoço menor que o intervalo (min)"],
+    ["janelaDuplicada", "Batidas com até esta diferença contam como duplicadas (min)"]
   ];
 
   const st = {
@@ -882,6 +901,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
       k(soma(a => a.cont.saidaAntecipada) ? "warn" : "good", "Saídas antecipadas", soma(a => a.cont.saidaAntecipada) + " dias", C.fmt(soma(a => a.min.saidaAntecipada)) + " · " + quem(a => a.cont.saidaAntecipada) + " pessoas") +
       k(soma(a => a.cont.almocoApos6h + a.cont.semIntervalo) ? "warn" : "good", "Almoço após 6h", soma(a => a.cont.almocoApos6h + a.cont.semIntervalo) + " dias", quem(a => a.cont.almocoApos6h + a.cont.semIntervalo) + " pessoas") +
       k(soma(a => a.cont.atrasoVolta) ? "warn" : "good", "Atraso na volta do almoço", soma(a => a.cont.atrasoVolta) + " dias", C.fmt(soma(a => a.min.atrasoVolta)) + " · " + quem(a => a.cont.atrasoVolta) + " pessoas") +
+      k(soma(a => a.cont.almocoCurto) ? "warn" : "good", "Almoço menor que 1h", soma(a => a.cont.almocoCurto) + " dias", C.fmt(soma(a => a.min.almocoCurto)) + " · " + quem(a => a.cont.almocoCurto) + " pessoas") +
+      k(soma(a => a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) ? "bad" : "good", "Marcação faltando ou duplicada", soma(a => a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) + " dias", soma(a => a.cont.marcacaoFaltando) + " faltando · " + soma(a => a.cont.marcacaoDuplicada) + " duplicadas") +
       k(soma(a => a.cont.almocoForaHorario) ? "warn" : "good", "Almoço fora do horário", soma(a => a.cont.almocoForaHorario) + " dias", quem(a => a.cont.almocoForaHorario) + " pessoas") +
       k(soma(a => a.cont.acima10h) ? "bad" : "good", "Acima de " + C.fmt(st.cfg.limiteDiario) + " no dia", soma(a => a.cont.acima10h) + " dias", quem(a => a.cont.acima10h) + " pessoas") +
       k(neg ? "bad" : "good", "Horas negativas no mês", C.fmt(neg), devedores + " com banco negativo") +
@@ -894,8 +915,10 @@ td.obs textarea.salvando { border-color: var(--warn); }
       ["sa", "Saída antecipada", x => x.a.cont.saidaAntecipada * 1e4 + x.a.min.saidaAntecipada],
       ["a6", "Almoço após 6h", x => x.a.cont.almocoApos6h + x.a.cont.semIntervalo],
       ["av", "Volta do almoço", x => x.a.cont.atrasoVolta * 1e4 + x.a.min.atrasoVolta],
+      ["ac", "Almoço < 1h", x => x.a.cont.almocoCurto * 1e4 + x.a.min.almocoCurto],
       ["af", "Almoço fora", x => x.a.cont.almocoForaHorario],
       ["d10", "Acima de 10h", x => x.a.cont.acima10h],
+      ["mc", "Marcações", x => x.a.cont.marcacaoFaltando + x.a.cont.marcacaoDuplicada],
       ["neg", "Horas negativas", x => x.a.horasNegativas],
       ["sm", "Saldo do mês", x => x.a.saldoMes],
       ["bh", "Banco de horas", x => x.a.bancoAcumulado]
@@ -919,8 +942,10 @@ td.obs textarea.salvando { border-color: var(--warn); }
         '<td class="t">' + cel(a.cont.saidaAntecipada, a.min.saidaAntecipada) + "</td>" +
         '<td class="t">' + cel(a.cont.almocoApos6h + a.cont.semIntervalo) + "</td>" +
         '<td class="t">' + cel(a.cont.atrasoVolta, a.min.atrasoVolta) + "</td>" +
+        '<td class="t">' + cel(a.cont.almocoCurto, a.min.almocoCurto) + "</td>" +
         '<td class="t">' + cel(a.cont.almocoForaHorario) + "</td>" +
         '<td class="t">' + (a.cont.acima10h ? '<span class="pill bad">' + a.cont.acima10h + "</span>" : '<span class="zero">—</span>') + "</td>" +
+        '<td class="t">' + ((a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) ? '<span class="pill bad" title="' + a.cont.marcacaoFaltando + ' faltando, ' + a.cont.marcacaoDuplicada + ' duplicadas">' + (a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) + "</span>" : '<span class="zero">—</span>') + "</td>" +
         '<td class="t ' + (a.horasNegativas ? "neg" : "") + '">' + (a.horasNegativas ? "-" + C.fmt(a.horasNegativas) : '<span class="zero">00:00</span>') + "</td>" +
         hm(a.saldoMes, true) + hm(a.bancoAcumulado, true) + "</tr>";
     });
@@ -939,7 +964,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
     return grupos.map(g => (g.dias.length > 1 ? DIAS[g.dias[0]] + "–" + DIAS[g.dias[g.dias.length - 1]] : DIAS[g.dias[0]]) + " " + g.t).join(" · ");
   }
 
-  const CLS_OC = { acima10h: "bad", atrasoEntrada: "warn", saidaAntecipada: "warn", almocoApos6h: "warn", atrasoVolta: "warn", almocoForaHorario: "info", semIntervalo: "warn", incompleta: "bad", semMarcacao: "bad" };
+  const CLS_OC = { acima10h: "bad", atrasoEntrada: "warn", saidaAntecipada: "warn", almocoApos6h: "warn", atrasoVolta: "warn", almocoForaHorario: "info", semIntervalo: "warn", almocoCurto: "warn", marcacaoFaltando: "bad", marcacaoDuplicada: "bad", marcacaoExtra: "info", semMarcacao: "bad" };
   const ROT_TIPO = { falta: ["Falta não justificada", "bad"], justificada: ["Falta justificada", "info"], feriado: ["Feriado", "info"], ferias: ["Férias", "info"], licenca: ["Licença", "info"], ajuste: ["Ajuste de banco", "info"], outro: ["Abono", "info"] };
 
   function htmlColab(x) {
@@ -957,6 +982,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
       k(a.cont.saidaAntecipada ? "warn" : "good", "Saídas antecipadas", dias(a.cont.saidaAntecipada), C.fmt(a.min.saidaAntecipada) + " no total") +
       k(a6 ? "warn" : "good", "Almoço após 6h", dias(a6), a.cont.semIntervalo ? a.cont.semIntervalo + " sem registrar almoço" : "limite " + C.fmt(st.cfg.limiteAntesAlmoco)) +
       k(a.cont.atrasoVolta ? "warn" : "good", "Atraso na volta do almoço", dias(a.cont.atrasoVolta), C.fmt(a.min.atrasoVolta) + " além de " + C.fmt(st.cfg.intervalo)) +
+      k(a.cont.almocoCurto ? "warn" : "good", "Almoço menor que 1h", dias(a.cont.almocoCurto), C.fmt(a.min.almocoCurto) + " a menos no total") +
+      k((a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) ? "bad" : "good", "Marcação faltando ou duplicada", dias(a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada), a.dias.filter(d => d.ocorrencias.some(o => o.cod === "marcacaoFaltando" || o.cod === "marcacaoDuplicada")).map(d => d.data).join(", ") || "nenhuma") +
       k(a.cont.almocoForaHorario ? "warn" : "good", "Almoço fora do horário", dias(a.cont.almocoForaHorario), "margem de " + st.cfg.margemHorarioAlmoco + " min") +
       k(a.cont.acima10h ? "bad" : "good", "Acima de " + C.fmt(st.cfg.limiteDiario) + " no dia", dias(a.cont.acima10h), a.dias.filter(d => d.ocorrencias.some(o => o.cod === "acima10h")).map(d => d.data).join(", ") || "nenhum") +
       k(a.horasNegativas ? "bad" : "good", "Horas negativas", a.horasNegativas ? "-" + C.fmt(a.horasNegativas) : "00:00", "dias com saldo devedor") +
@@ -1099,7 +1126,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
         ["Almoço após 6h", rs("almocoApos6h") + (a.cont.semIntervalo ? " + " + a.cont.semIntervalo + " sem almoço" : ""), "Horas negativas", a.horasNegativas ? "-" + C.fmt(a.horasNegativas) : "00:00"],
         ["Atraso na volta do almoço", rs("atrasoVolta"), "Saldo anterior do banco", C.fmt(a.bancoAnterior)],
         ["Almoço fora do horário", rs("almocoForaHorario"), "Saldo do mês" + (a.ajusteBanco ? " / quitação" : ""), C.fmt(a.saldoMes) + (a.ajusteBanco ? " / " + C.fmt(a.ajusteBanco) : "")],
-        ["Acima de " + C.fmt(st.cfg.limiteDiario) + " no dia", rs("acima10h"), "Saldo acumulado do banco", C.fmt(a.bancoAcumulado)]
+        ["Acima de " + C.fmt(st.cfg.limiteDiario) + " no dia", rs("acima10h"), "Saldo acumulado do banco", C.fmt(a.bancoAcumulado)],
+        ["Almoço menor que 1h", rs("almocoCurto"), "Marcação faltando / duplicada", a.cont.marcacaoFaltando + " / " + a.cont.marcacaoDuplicada]
       ],
       columnStyles: { 0: { fontStyle: "bold", cellWidth: 120 }, 2: { fontStyle: "bold", cellWidth: 120 } }
     }));
