@@ -137,6 +137,10 @@ tr.falta td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
 .banco { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .banco > div { padding: 8px 10px; background: var(--paper); border-radius: 6px; }
 .banco .rot { font-size: 12px; color: var(--muted); }
+.fech { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 4px; font-size: 13px; }
+.fech .rot { color: var(--muted); }
+.editaAcordo { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.editaAcordo input { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
 .banco .val { font-family: var(--mono); font-size: 18px; font-weight: 600; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .filtro { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-left: auto; }
@@ -197,6 +201,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
   <div class="actions">
     <div class="quem" id="quem"></div>
     <button class="btn" id="btnUsuarios" type="button" hidden>Usuários</button>
+    <button class="btn" id="btnBanco" type="button">Fechamento do banco</button>
     <button class="btn" id="btnRegras" type="button">Regras</button>
     <button class="btn" id="btnSenha" type="button">Trocar senha</button>
     <button class="btn" id="btnSair" type="button">Sair</button>
@@ -256,6 +261,16 @@ td.obs textarea.salvando { border-color: var(--warn); }
   </div>
 </dialog>
 
+<dialog id="dlgBanco" style="width:min(820px, calc(100% - 32px))">
+  <h2>Fechamento do banco de horas</h2>
+  <p id="bancoInfo"></p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <input id="bancoBusca" type="search" placeholder="Buscar colaborador" aria-label="Buscar colaborador no banco" style="flex:1;min-width:180px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper)">
+  </div>
+  <div class="tabela" style="max-height:55vh;overflow:auto;margin-top:10px"><table><thead><tr><th>Colaborador</th><th class="t">Início do ciclo atual</th><th class="t">Vence em</th><th class="t">Faltam</th><th>Situação</th></tr></thead><tbody id="bancoTabela"></tbody></table></div>
+  <div class="rodape"><button class="btn" type="button" id="bancoFechar">Fechar</button></div>
+</dialog>
+
 <dialog id="dlgConfirm">
   <h2 id="cfTitulo"></h2>
   <p id="cfTexto"></p>
@@ -286,7 +301,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
     margemHorarioAlmoco: 30, // diferença aceita entre saída prevista e real para o almoço (min)
     limiteDiario: 600,     // máximo de horas trabalhadas no dia (min)
     tolAlmocoCurto: 0,     // tolerância para intervalo menor que o previsto (min)
-    janelaDuplicada: 5     // batidas com até X min de diferença contam como duplicadas
+    janelaDuplicada: 5,    // batidas com até X min de diferença contam como duplicadas
+    limiteDesconto: 6000   // máximo de horas negativas descontadas no fechamento do banco (min)
   };
 
   const TIME_RE = /\d{1,3}:\d{2}/g;
@@ -345,15 +361,14 @@ td.obs textarea.salvando { border-color: var(--warn); }
     const hdrDia = find(/^DIA \/ M[ÊE]S$/)[0];
     if (!hdrDia) return out;
 
-    const c = { nome: "", cpf: "", setor: "", cargo: "", admissao: "", escala: {}, dias: [], totais: {}, resumo: {} };
+    // CPF, admissão e CTPS não são lidos nem guardados: o app só precisa do nome, cargo e setor.
+    const c = { nome: "", setor: "", cargo: "", escala: {}, dias: [], totais: {}, resumo: {} };
     if (hdrColab) {
       const nomeLbl = find(/^Nome:$/).filter(i => i.y < hdrColab.y).sort((a, b) => b.y - a.y)[0];
       if (nomeLbl) c.nome = valueRight(items, nomeLbl, 300);
       const lbl = (re) => find(re).filter(i => i.y < hdrColab.y && i.y > hdrDia.y)[0];
-      const l1 = lbl(/^CPF:$/); if (l1) c.cpf = valueRight(items, l1, 120);
       const l2 = lbl(/^C[óo]digo:$/); if (l2) c.setor = valueRight(items, l2, 200);
       const l3 = lbl(/^Cargo:$/); if (l3) c.cargo = valueRight(items, l3, 120);
-      const l4 = lbl(/^Admiss[ãa]o:$/); if (l4) c.admissao = valueRight(items, l4, 60);
     }
 
     // Quadro de horários
@@ -441,12 +456,18 @@ td.obs textarea.salvando { border-color: var(--warn); }
       if (r.periodo && !periodo) periodo = r.periodo;
       if (!r.colab) continue;
       const prev = colabs[colabs.length - 1];
-      if (prev && (!r.colab.nome || (r.colab.cpf && r.colab.cpf === prev.cpf))) {
+      if (prev && (!r.colab.nome || r.colab.nome === prev.nome)) {
         prev.dias = prev.dias.concat(r.colab.dias);           // continuação em outra página
         if (Object.keys(r.colab.totais).length) { prev.totais = r.colab.totais; prev.resumo = r.colab.resumo; }
       } else colabs.push(r.colab);
     }
     if (!periodo) throw new Error("Não encontrei o período da folha (ex.: 01/10/2026 a 31/10/2026).");
+    const usados = {};
+    colabs.forEach(c => {
+      const base = (norm(c.nome).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "colaborador").slice(0, 56);
+      usados[base] = (usados[base] || 0) + 1;
+      c.uid = usados[base] > 1 ? base + "-" + usados[base] : base;
+    });
     if (!colabs.length) throw new Error("Não encontrei nenhum colaborador neste PDF. Confira se é a Folha de Ponto exportada do sistema.");
     const [dd, mm, yyyy] = periodo.fim.split("/");
     return { periodo, mes: yyyy + "-" + mm, colaboradores: colabs };
@@ -582,7 +603,80 @@ td.obs textarea.salvando { border-color: var(--warn); }
     return r;
   }
 
-  const api = { DEFAULT_CFG, OCORRENCIAS, toMin, fmt, norm, parsePdf, analisaColaborador, classificaRotulo };
+  /* ---------------- Fechamento do banco de horas (planilha) ---------------- */
+  function chaveNome(n) { return norm(n).replace(/[^a-z0-9]+/g, " ").trim(); }
+  function serialParaISO(v) {
+    if (v == null || v === "") return null;
+    if (typeof v === "number") {
+      const d = new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000);
+      return d.toISOString().slice(0, 10);
+    }
+    const m = String(v).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) return m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0");
+    const m2 = String(v).match(/(\d{4})-(\d{2})-(\d{2})/);
+    return m2 ? m2[0] : null;
+  }
+  function addMeses(iso, n) {
+    const [y, m, d] = iso.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1 + n, 1));
+    const ult = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 0)).getUTCDate();
+    dt.setUTCDate(Math.min(d, ult));
+    return dt.toISOString().slice(0, 10);
+  }
+  function limiteMin(v) {
+    if (v == null || v === "") return null;
+    if (typeof v === "number") return Math.round(v * 60);
+    const m = String(v).match(/(\d+)\s*(?:h|:)?\s*(\d{1,2})?/i);
+    return m ? parseInt(m[1], 10) * 60 + (m[2] ? parseInt(m[2], 10) : 0) : null;
+  }
+  // linhas: matriz (primeira aba da planilha, valores crus). Retorna [{chave, nome, inicio, vencimento, limite}]
+  function parseBancoLinhas(linhas) {
+    let h = -1, cN = -1, cI = -1, cV = -1, cL = -1;
+    for (let i = 0; i < Math.min(linhas.length, 30) && h < 0; i++) {
+      const r = (linhas[i] || []).map(x => norm(x));
+      const n = r.findIndex(x => x === "nome");
+      const v = r.findIndex(x => /vencimento/.test(x));
+      if (n >= 0 && v >= 0) { h = i; cN = n; cV = v; cI = r.findIndex(x => /inicio/.test(x)); cL = r.findIndex(x => /limite/.test(x)); }
+    }
+    if (h < 0) throw new Error("Não encontrei as colunas NOME e VENCIMENTO na planilha.");
+    const out = [];
+    for (let i = h + 1; i < linhas.length; i++) {
+      const r = linhas[i] || [];
+      const nome = String(r[cN] || "").replace(/\s+/g, " ").trim();
+      if (!nome || /:/.test(nome)) continue;
+      const inicio = cI >= 0 ? serialParaISO(r[cI]) : null;
+      let venc = serialParaISO(r[cV]);
+      if (!venc && inicio) venc = addMeses(inicio, 6);
+      if (!venc) continue;
+      out.push({ chave: chaveNome(nome), nome, inicio, vencimento: venc, limite: (cL >= 0 ? limiteMin(r[cL]) : null) || 6000 });
+    }
+    if (!out.length) throw new Error("A planilha não tem nenhum colaborador com data de vencimento.");
+    return out;
+  }
+  function hojeISO() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+  function diasAte(iso) { return Math.round((Date.parse(iso + "T00:00:00Z") - Date.parse(hojeISO() + "T00:00:00Z")) / 86400000); }
+  // ciclo de 6 meses a partir do início do acordo; ao vencer, começa um novo ciclo
+  function cicloBanco(inicioOriginal, hoje) {
+    if (!inicioOriginal) return null;
+    hoje = hoje || hojeISO();
+    let k = 0;
+    while (addMeses(inicioOriginal, 6 * (k + 1)) <= hoje && k < 400) k++;
+    return { inicioOriginal, inicio: addMeses(inicioOriginal, 6 * k), vencimento: addMeses(inicioOriginal, 6 * (k + 1)), ciclo: k + 1 };
+  }
+  function statusFechamento(item) {
+    if (!item) return null;
+    const dias = diasAte(item.vencimento);
+    return { dias, cod: dias < 0 ? "vencido" : dias <= 30 ? "proximo" : "avencer", txt: dias < 0 ? "Vencido" : dias <= 30 ? "Próximo do fechamento" : "A vencer" };
+  }
+  function dataBR(iso) { if (!iso) return ""; const [y, m, d] = iso.split("-"); return d + "/" + m + "/" + y; }
+  // projeção no fechamento: saldo negativo é descontado até o limite; positivo é pago
+  function projecaoFechamento(saldo, limite) {
+    limite = limite || 6000;
+    if (saldo < 0) { const deve = -saldo; return { tipo: "desconto", valor: Math.min(deve, limite), excedente: Math.max(0, deve - limite), limite }; }
+    return { tipo: saldo > 0 ? "pagar" : "zerado", valor: saldo, excedente: 0, limite };
+  }
+
+  const api = { cicloBanco, hojeISO, chaveNome, parseBancoLinhas, statusFechamento, projecaoFechamento, dataBR, diasAte, addMeses, DEFAULT_CFG, OCORRENCIAS, toMin, fmt, norm, parsePdf, analisaColaborador, classificaRotulo };
   root.PontoCore = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
@@ -604,21 +698,22 @@ td.obs textarea.salvando { border-color: var(--warn); }
     ["margemHorarioAlmoco", "Diferença aceita entre o horário previsto e o real de saída para o almoço (min)"],
     ["limiteDiario", "Máximo de tempo trabalhado no dia (min). 600 = 10h"],
     ["tolAlmocoCurto", "Tolerância para almoço menor que o intervalo (min)"],
-    ["janelaDuplicada", "Batidas com até esta diferença contam como duplicadas (min)"]
+    ["janelaDuplicada", "Batidas com até esta diferença contam como duplicadas (min)"],
+    ["limiteDesconto", "Máximo de horas negativas descontadas no vencimento do banco (min). 6000 = 100h"]
   ];
 
   const st = {
     sb: null, me: null, papel: null, admin: false, podeEscrever: false, podeEditarRegras: false,
     meses: [], mes: null, colabs: [], cfg: Object.assign({}, C.DEFAULT_CFG),
     sel: "equipe", busca: "", soOcorrencias: false, ordem: { k: "nome", dir: 1 },
-    local: {}, pendente: null, obs: {}
+    local: {}, pendente: null, obs: {}, banco: {}, bancoMeta: null
   };
 
   function dias(n) { return n + (n === 1 ? " dia" : " dias"); }
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
   function nomeMes(id) { const [y, m] = id.split("-"); return MESES[+m - 1] + "/" + y; }
   function curtoMes(id) { const [y, m] = id.split("-"); return MESES[+m - 1].slice(0, 3) + "/" + y; }
-  function idColab(c) { return (c.cpf || C.norm(c.nome).replace(/[^a-z0-9]+/g, "-")).slice(0, 60) || "sem-id"; }
+  function idColab(c) { return c.uid || (C.norm(c.nome).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "colaborador").slice(0, 56); }
   function status(msg, ruim) { const s = $("status"); s.textContent = msg || ""; s.className = "status" + (msg ? " show" : "") + (ruim ? " bad" : ""); }
 
   /* ---------- confirmação no próprio app ---------- */
@@ -634,7 +729,11 @@ td.obs textarea.salvando { border-color: var(--warn); }
 
   /* ---------- dados (Supabase) ---------- */
   function analisados() {
-    return st.colabs.map(c => ({ c, a: C.analisaColaborador(c, st.cfg), id: idColab(c) }))
+    return st.colabs.map(c => {
+      const a = C.analisaColaborador(c, st.cfg), b = bancoDe(c);
+      a.fech = C.statusFechamento(b); a.proj = b ? C.projecaoFechamento(a.bancoAcumulado, st.cfg.limiteDesconto) : null;
+      return { c, a, b, id: idColab(c) };
+    })
       .sort((x, y) => x.c.nome.localeCompare(y.c.nome, "pt-BR"));
   }
   function erroTxt(e) { return (e && (e.message || e.error_description || e.code)) || String(e); }
@@ -685,6 +784,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
     renderQuem();
     const r = await st.sb.from("regras").select("cfg").eq("id", 1).maybeSingle();
     if (r.data && r.data.cfg) st.cfg = Object.assign({}, C.DEFAULT_CFG, r.data.cfg);
+    await carregarBanco();
     await carregarMeses();
   }
 
@@ -796,6 +896,17 @@ td.obs textarea.salvando { border-color: var(--warn); }
       });
       if (res.error) throw res.error;
       const linhas = r.colaboradores.map(c => ({ mes: r.mes, colab_id: idColab(c), dados: c }));
+      // leva as observações de registros antigos (identificados pelo CPF) para o novo identificador
+      const antigos = await st.sb.from("colaboradores_mes").select("colab_id, nome:dados->>nome").eq("mes", r.mes);
+      if (antigos.error) throw antigos.error;
+      const porNome = {}; linhas.forEach(l => { porNome[l.dados.nome] = l.colab_id; });
+      for (const o of antigos.data) {
+        const novoId = porNome[o.nome];
+        if (novoId && novoId !== o.colab_id) {
+          const u = await st.sb.from("observacoes").update({ colab_id: novoId }).eq("mes", r.mes).eq("colab_id", o.colab_id);
+          if (u.error) throw u.error;
+        }
+      }
       res = await st.sb.from("colaboradores_mes").upsert(linhas);
       if (res.error) throw res.error;
       const ids = linhas.map(l => l.colab_id);
@@ -906,6 +1017,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
       k(soma(a => a.cont.almocoForaHorario) ? "warn" : "good", "Almoço fora do horário", soma(a => a.cont.almocoForaHorario) + " dias", quem(a => a.cont.almocoForaHorario) + " pessoas") +
       k(soma(a => a.cont.acima10h) ? "bad" : "good", "Acima de " + C.fmt(st.cfg.limiteDiario) + " no dia", soma(a => a.cont.acima10h) + " dias", quem(a => a.cont.acima10h) + " pessoas") +
       k(neg ? "bad" : "good", "Horas negativas no mês", C.fmt(neg), devedores + " com banco negativo") +
+      k(quem(a => a.fech && a.fech.cod !== "avencer") ? "warn" : "good", "Banco fecha em até 30 dias", quem(a => a.fech && a.fech.cod !== "avencer") + " pessoas", lista.filter(x => x.a.fech && x.a.fech.cod !== "avencer").map(x => x.c.nome.split(" ")[0]).join(", ") || "nenhuma") +
+      k(quem(a => a.proj && a.proj.excedente) ? "bad" : "good", "Acima do limite de desconto", quem(a => a.proj && a.proj.excedente) + " pessoas", "saldo negativo maior que " + C.fmt(st.cfg.limiteDesconto)) +
       "</div></div>";
 
     const cols = [
@@ -921,7 +1034,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
       ["mc", "Marcações", x => x.a.cont.marcacaoFaltando + x.a.cont.marcacaoDuplicada],
       ["neg", "Horas negativas", x => x.a.horasNegativas],
       ["sm", "Saldo do mês", x => x.a.saldoMes],
-      ["bh", "Banco de horas", x => x.a.bancoAcumulado]
+      ["bh", "Banco de horas", x => x.a.bancoAcumulado],
+      ["fb", "Fechamento do banco", x => x.a.fech ? x.a.fech.dias : 99999]
     ];
     const col = cols.find(c => c[0] === st.ordem.k) || cols[0];
     const ord = lista.slice().sort((a, b) => {
@@ -947,7 +1061,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
         '<td class="t">' + (a.cont.acima10h ? '<span class="pill bad">' + a.cont.acima10h + "</span>" : '<span class="zero">—</span>') + "</td>" +
         '<td class="t">' + ((a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) ? '<span class="pill bad" title="' + a.cont.marcacaoFaltando + ' faltando, ' + a.cont.marcacaoDuplicada + ' duplicadas">' + (a.cont.marcacaoFaltando + a.cont.marcacaoDuplicada) + "</span>" : '<span class="zero">—</span>') + "</td>" +
         '<td class="t ' + (a.horasNegativas ? "neg" : "") + '">' + (a.horasNegativas ? "-" + C.fmt(a.horasNegativas) : '<span class="zero">00:00</span>') + "</td>" +
-        hm(a.saldoMes, true) + hm(a.bancoAcumulado, true) + "</tr>";
+        hm(a.saldoMes, true) + hm(a.bancoAcumulado, true) +
+        '<td class="t">' + (x.b ? '<span class="mono">' + esc(C.dataBR(x.b.vencimento)) + "</span><br>" + pillFech(x.b) + (a.proj && a.proj.excedente ? ' <span class="pill bad" title="Acima do limite de desconto">+' + C.fmt(a.proj.excedente) + "</span>" : "") : '<span class="zero">sem data</span>') + "</td></tr>";
     });
     h += "</tbody></table></div></div>";
     return h;
@@ -965,6 +1080,44 @@ td.obs textarea.salvando { border-color: var(--warn); }
   }
 
   const CLS_OC = { acima10h: "bad", atrasoEntrada: "warn", saidaAntecipada: "warn", almocoApos6h: "warn", atrasoVolta: "warn", almocoForaHorario: "info", semIntervalo: "warn", almocoCurto: "warn", marcacaoFaltando: "bad", marcacaoDuplicada: "bad", marcacaoExtra: "info", semMarcacao: "bad" };
+  function bancoDe(c) { const i = st.banco[C.chaveNome(c.nome)]; return i && i.inicio ? Object.assign({ nome: i.nome }, C.cicloBanco(i.inicio)) : null; }
+  function cicloDeItem(i) { return Object.assign({ nome: i.nome }, C.cicloBanco(i.inicio)); }
+  function pillFech(item) {
+    const f = C.statusFechamento(item);
+    if (!f) return '<span class="pill info">Sem data</span>';
+    const cls = f.cod === "vencido" ? "bad" : f.cod === "proximo" ? "warn" : "info";
+    const t = f.dias < 0 ? "vencido há " + (-f.dias) + (f.dias === -1 ? " dia" : " dias") : f.dias === 0 ? "hoje" : "em " + f.dias + (f.dias === 1 ? " dia" : " dias");
+    return '<span class="pill ' + cls + '">' + t + "</span>";
+  }
+  function renderBancoTabela() {
+    const q = C.norm($("bancoBusca").value);
+    const itens = Object.values(st.banco).filter(i => i.inicio && (!q || C.norm(i.nome).includes(q))).map(cicloDeItem).sort((a, b) => a.vencimento.localeCompare(b.vencimento) || a.nome.localeCompare(b.nome, "pt-BR"));
+    $("bancoTabela").innerHTML = itens.map(i => { const f = C.statusFechamento(i);
+      return "<tr><td>" + esc(i.nome) + '</td><td class="t">' + esc(C.dataBR(i.inicio)) + '</td><td class="t"><b>' + esc(C.dataBR(i.vencimento)) + '</b></td><td class="t">' + pillFech(i) + "</td><td>" + esc(f.txt) + "</td></tr>"; }).join("") ||
+      '<tr><td colspan="5" class="legenda">Nenhuma data cadastrada.</td></tr>';
+  }
+  function abrirBanco() {
+    const n = Object.keys(st.banco).length;
+    $("bancoInfo").textContent = n + " colaboradores com acordo de banco de horas. O banco fecha a cada 6 meses a partir do início do acordo e recomeça automaticamente. No fechamento, o saldo negativo é descontado até " + C.fmt(st.cfg.limiteDesconto) + " e o positivo é pago. Para mudar a data de alguém, abra o colaborador.";
+    renderBancoTabela();
+    if (!$("dlgBanco").open) $("dlgBanco").showModal();
+  }
+  function htmlFechamento(c, a) {
+    const b = bancoDe(c);
+    let h = '<div class="fech">';
+    if (!b) h += '<div class="legenda">Sem data de início do acordo de banco de horas para este colaborador.</div>';
+    else {
+      const p = C.projecaoFechamento(a.bancoAcumulado, st.cfg.limiteDesconto);
+      h += "<div>" + (p.tipo === "desconto"
+        ? "Se o saldo continuar assim, no vencimento serão <b>descontadas " + C.fmt(p.valor) + "</b>" + (p.excedente ? ' <span class="pill bad">' + C.fmt(p.excedente) + " acima do limite de " + C.fmt(p.limite) + "</span>" : " (limite de " + C.fmt(p.limite) + ").")
+        : p.tipo === "pagar" ? "Se o saldo continuar assim, no vencimento serão <b>pagas " + C.fmt(p.valor) + "</b>." : "Saldo zerado.") +
+        '</div><div class="legenda">Ciclo ' + b.ciclo + " do acordo iniciado em " + esc(C.dataBR(b.inicioOriginal)) + ". Saldo considerado: acumulado até o fim de " + esc(nomeMes(st.mes)) + ".</div>";
+    }
+    if (podeEditarBanco()) {
+      h += '<div class="editaAcordo"><label for="inicioAcordo">Início do acordo</label><input type="date" id="inicioAcordo" value="' + esc(b ? b.inicioOriginal : "") + '"><button class="btn" type="button" id="btnInicioAcordo">Salvar data</button><span class="legenda">Os próximos fechamentos são calculados a cada 6 meses a partir desta data.</span></div>';
+    }
+    return h + "</div>";
+  }
   const ROT_TIPO = { falta: ["Falta não justificada", "bad"], justificada: ["Falta justificada", "info"], feriado: ["Feriado", "info"], ferias: ["Férias", "info"], licenca: ["Licença", "info"], ajuste: ["Ajuste de banco", "info"], outro: ["Abono", "info"] };
 
   function htmlColab(x) {
@@ -972,7 +1125,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
     const k = (cls, rot, val, det) => '<div class="kpi ' + cls + '"><div class="rot">' + rot + '</div><div class="val">' + val + '</div><div class="det">' + det + "</div></div>";
     const a6 = a.cont.almocoApos6h + a.cont.semIntervalo;
     let h = '<div class="card"><div class="head"><h2>' + esc(c.nome) + '</h2><span class="meta">' + esc(nomeMes(st.mes)) + '</span><button class="btn" type="button" id="btnPdf" style="margin-left:auto">Baixar folha tratada (PDF)</button></div>' +
-      '<div class="perfil"><span>Cargo <b>' + esc(c.cargo || "—") + "</b></span><span>Setor <b>" + esc(c.setor || "—") + "</b></span><span>Admissão <b>" + esc(c.admissao || "—") + "</b></span>" + (a.manuais ? "<span>Marcações ajustadas manualmente <b>" + a.manuais + " dias</b></span>" : "") + "</div>" +
+      '<div class="perfil"><span>Cargo <b>' + esc(c.cargo || "—") + "</b></span><span>Setor <b>" + esc(c.setor || "—") + "</b></span>" + (a.manuais ? "<span>Marcações ajustadas manualmente <b>" + a.manuais + " dias</b></span>" : "") + "</div>" +
       '<div class="escala">Jornada: ' + esc(textoEscala(c.escala || {}) || "não informada") + "</div></div>";
 
     h += '<div class="kpis">' +
@@ -989,7 +1142,10 @@ td.obs textarea.salvando { border-color: var(--warn); }
       k(a.horasNegativas ? "bad" : "good", "Horas negativas", a.horasNegativas ? "-" + C.fmt(a.horasNegativas) : "00:00", "dias com saldo devedor") +
       "</div>";
 
+    const bc = bancoDe(c);
     h += '<div class="card"><div class="head"><h2>Banco de horas</h2></div><div class="banco">' +
+      '<div><div class="rot">Início do acordo</div><div class="val">' + (bc ? esc(C.dataBR(bc.inicio)) : "—") + "</div></div>" +
+      '<div style="background:' + (bc && C.statusFechamento(bc).cod !== "avencer" ? "var(--warn-soft)" : "var(--paper)") + '"><div class="rot">Vence em</div><div class="val">' + (bc ? esc(C.dataBR(bc.vencimento)) : "—") + "</div>" + (bc ? pillFech(bc) : "") + "</div>" +
       '<div><div class="rot">Saldo anterior</div><div class="val">' + C.fmt(a.bancoAnterior, { plus: true }) + "</div></div>" +
       '<div><div class="rot">Horas positivas no mês</div><div class="val" style="color:var(--good)">+' + C.fmt(a.horasPositivas) + "</div></div>" +
       '<div><div class="rot">Horas negativas no mês</div><div class="val" style="color:var(--bad)">' + (a.horasNegativas ? "-" : "") + C.fmt(a.horasNegativas) + "</div></div>" +
@@ -997,6 +1153,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
       (a.ajusteBanco ? '<div><div class="rot">Quitação / ajuste</div><div class="val">' + C.fmt(a.ajusteBanco, { plus: true }) + "</div></div>" : "") +
       '<div style="background:' + (a.bancoAcumulado < 0 ? "var(--bad-soft)" : "var(--good-soft)") + '"><div class="rot">Saldo acumulado</div><div class="val" style="color:' + (a.bancoAcumulado < 0 ? "var(--bad)" : "var(--good)") + '">' + C.fmt(a.bancoAcumulado, { plus: true }) + "</div></div>" +
       "</div>";
+    h += htmlFechamento(c, a);
     const af = Object.entries(a.afastamentos);
     if (af.length || a.justificadas.length) {
       h += '<div class="chips" style="margin-top:12px">' +
@@ -1043,6 +1200,12 @@ td.obs textarea.salvando { border-color: var(--warn); }
     });
     aplicarObs();
     const b = $("btnPdf"); if (b) b.onclick = () => baixarPdf(x);
+    const bi = $("btnInicioAcordo"); if (bi) bi.onclick = async () => {
+      const v = $("inicioAcordo").value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { status("Escolha a data de início do acordo.", true); return; }
+      try { await salvarInicioAcordo(x.c.nome, v); status("Início do acordo de " + x.c.nome + " salvo."); setTimeout(() => status(""), 3000); renderTudo(); }
+      catch (e) { status("Não foi possível salvar a data: " + (e && (e.message || e.code) || e), true); }
+    };
   }
 
   function ligarDrop(el) {
@@ -1075,7 +1238,7 @@ td.obs textarea.salvando { border-color: var(--warn); }
 
     doc.autoTable(Object.assign({}, base, {
       startY: 62, head: [[{ content: "DADOS DO COLABORADOR", colSpan: 4 }]],
-      body: [["Nome", c.nome, "CPF", c.cpf || ""], ["Cargo", c.cargo || "", "Setor", c.setor || ""], ["Admissão", c.admissao || "", "Jornada", textoEscala(c.escala || {})]],
+      body: [["Nome", c.nome, "Cargo", c.cargo || ""], ["Setor", c.setor || "", "Jornada", textoEscala(c.escala || {})]],
       columnStyles: { 0: { fontStyle: "bold", cellWidth: 55 }, 2: { fontStyle: "bold", cellWidth: 50 } }
     }));
 
@@ -1127,7 +1290,8 @@ td.obs textarea.salvando { border-color: var(--warn); }
         ["Atraso na volta do almoço", rs("atrasoVolta"), "Saldo anterior do banco", C.fmt(a.bancoAnterior)],
         ["Almoço fora do horário", rs("almocoForaHorario"), "Saldo do mês" + (a.ajusteBanco ? " / quitação" : ""), C.fmt(a.saldoMes) + (a.ajusteBanco ? " / " + C.fmt(a.ajusteBanco) : "")],
         ["Acima de " + C.fmt(st.cfg.limiteDiario) + " no dia", rs("acima10h"), "Saldo acumulado do banco", C.fmt(a.bancoAcumulado)],
-        ["Almoço menor que 1h", rs("almocoCurto"), "Marcação faltando / duplicada", a.cont.marcacaoFaltando + " / " + a.cont.marcacaoDuplicada]
+        ["Almoço menor que 1h", rs("almocoCurto"), "Marcação faltando / duplicada", a.cont.marcacaoFaltando + " / " + a.cont.marcacaoDuplicada],
+        ["Banco de horas", x.b ? "início " + C.dataBR(x.b.inicio) + ", vence " + C.dataBR(x.b.vencimento) : "sem data cadastrada", "Projeção no fechamento", a.proj ? (a.proj.tipo === "desconto" ? "descontar " + C.fmt(a.proj.valor) + (a.proj.excedente ? " (limite " + C.fmt(a.proj.limite) + "; " + C.fmt(a.proj.excedente) + " acima)" : "") : a.proj.tipo === "pagar" ? "pagar " + C.fmt(a.proj.valor) : "zerado") : "-"]
       ],
       columnStyles: { 0: { fontStyle: "bold", cellWidth: 120 }, 2: { fontStyle: "bold", cellWidth: 120 } }
     }));
@@ -1166,6 +1330,21 @@ td.obs textarea.salvando { border-color: var(--warn); }
       status("");
       await salvarArquivo("Folhas tratadas " + st.mes + ".zip", blob);
     } catch (e) { console.error(e); status("Não consegui gerar as folhas: " + (e.message || e), true); }
+  }
+
+  async function carregarBanco() {
+    const { data, error } = await st.sb.from("acordos_bh").select("*");
+    if (error) { status("Não foi possível ler as datas do banco de horas. Rode o script supabase-atualizacao-banco.sql no Supabase. (" + erroTxt(error) + ")", true); return; }
+    st.banco = {};
+    data.forEach(r => { st.banco[r.chave] = { chave: r.chave, nome: r.nome, inicio: r.inicio }; });
+  }
+  function podeEditarBanco() { return st.admin; }
+  async function salvarInicioAcordo(nome, inicio) {
+    if (!st.admin) throw new Error("Só o administrador pode mudar a data do acordo.");
+    const chave = C.chaveNome(nome);
+    const { error } = await st.sb.from("acordos_bh").upsert({ chave, nome, inicio, atualizado_em: new Date().toISOString() });
+    if (error) throw error;
+    st.banco[chave] = { chave, nome, inicio };
   }
 
   /* ---------- regras ---------- */
@@ -1240,6 +1419,9 @@ td.obs textarea.salvando { border-color: var(--warn); }
   $("impCancelar").onclick = () => { st.pendente = null; $("dlgImport").close(); };
   $("impSalvar").onclick = salvarPendente;
   $("btnRegras").onclick = abrirRegras;
+  $("btnBanco").onclick = abrirBanco;
+  $("bancoFechar").onclick = () => $("dlgBanco").close();
+  $("bancoBusca").oninput = renderBancoTabela;
   $("regrasFechar").onclick = () => $("dlgRegras").close();
   $("regrasSalvar").onclick = salvarRegras;
   $("btnExcluirMes").onclick = excluirMes;
